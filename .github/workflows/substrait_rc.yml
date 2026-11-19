@@ -1,0 +1,153 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Substrait RC
+on:
+  push:
+    branches:
+      - '**'
+      - '!dependabot/**'
+    tags:
+      - 'substrait/v*-rc*'
+    paths:
+      - '.github/workflows/substrait_rc.yml'
+      - 'dev/release/run_rat.sh'
+      - 'dev/release/substrait/**'
+      - 'substrait/**'
+  pull_request:
+    paths:
+      - '.github/workflows/substrait_rc.yml'
+      - 'dev/release/run_rat.sh'
+      - 'dev/release/substrait/**'
+      - 'substrait/**'
+concurrency:
+  group: ${{ github.repository }}-${{ github.event.pull_request.number || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  archive:
+    name: Archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          submodules: recursive
+      - name: Prepare for tag
+        if: github.ref_type == 'tag'
+        run: |
+          version=${GITHUB_REF_NAME%-rc*}
+          version=${version#substrait/v}
+          rc=${GITHUB_REF_NAME#*-rc}
+          echo "VERSION=${version}" >> ${GITHUB_ENV}
+          echo "RC=${rc}" >> ${GITHUB_ENV}
+      - name: Prepare for branch
+        if: github.ref_type == 'branch'
+        run: |
+          version=$(grep -o '^const PkgVersion = ".*"' "substrait/doc.go" |
+            sed \
+              -e 's/^const PkgVersion = "//' \
+              -e 's/"$//')
+          rc=$(date +%Y%m%d)
+          echo "VERSION=${version}" >> ${GITHUB_ENV}
+          echo "RC=${rc}" >> ${GITHUB_ENV}
+      - name: Archive
+        run: |
+          id="apache-arrow-go-substrait-${VERSION}"
+          tar_gz="${id}.tar.gz"
+          echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
+          git archive HEAD:substrait --prefix "${id}/" --output "${tar_gz}"
+          sha256sum "${tar_gz}" > "${tar_gz}.sha256"
+          sha512sum "${tar_gz}" > "${tar_gz}.sha512"
+      - name: Audit
+        run: |
+          dev/release/run_rat.sh "${TAR_GZ}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive
+          path: |
+            apache-arrow-go-substrait-*
+  verify:
+    name: Verify
+    needs:
+      - archive
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          # ubuntu-latest moved to 26.04, where LeakSanitizer in the clang 21
+          # -asan runtime crashes ("Tracer caught signal 11") in cgo packages
+          # such as arrow/memory/mallocator and arrow/cdata. Stay on 24.04
+          # until that is fixed.
+          - ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6.2.0
+        with:
+          go-version-file: substrait/go.mod
+      - name: Verify
+        run: |
+          tar_gz=$(echo apache-arrow-go-substrait-*.tar.gz)
+          version=${tar_gz#apache-arrow-go-substrait-}
+          version=${version%.tar.gz}
+          # rc isn't used with VERIFY_DOWNLOAD=0
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            rc="${GITHUB_REF_NAME#*-rc}"
+          else
+            rc=$(date +%Y%m%d)
+          fi
+          VERIFY_DEFAULT=0 dev/release/substrait/verify_rc.sh "${version}" "${rc}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  upload:
+    name: Upload
+    if: github.ref_type == 'tag'
+    needs:
+      - verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive
+      - name: Upload
+        run: |
+          # TODO: Add support for release note
+          gh release create ${GITHUB_REF_NAME} \
+            --prerelease \
+            --title "Apache Arrow Go Substrait ${GITHUB_REF_NAME#substrait/v}" \
+            --verify-tag \
+            apache-arrow-go-substrait-*.tar.gz \
+            apache-arrow-go-substrait-*.tar.gz.sha*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

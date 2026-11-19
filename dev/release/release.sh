@@ -65,7 +65,7 @@ rm -rf "${dist_base_dir}"
 echo "Keep only the latest versions"
 old_releases=$(
   svn ls https://dist.apache.org/repos/dist/release/arrow/ |
-    grep -E '^apache-arrow-go-' |
+    grep -E '^apache-arrow-go-[0-9]' |
     sort --version-sort --reverse |
     tail -n +2
 )
