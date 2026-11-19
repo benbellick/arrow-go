@@ -119,6 +119,12 @@ go test "${test_args[@]}" -short -tags ${tags},noasm ./...
 
 popd
 
+pushd "${source_dir}/arrow/compute/exprs"
+
+go test "${test_args[@]}" -short -tags ${tags} ./...
+
+popd
+
 pushd "${source_dir}/parquet"
 
 # parquet/file holds the large-value regression tests, which are what exhaust
