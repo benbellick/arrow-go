@@ -16,7 +16,7 @@
 
 //go:build go1.18
 
-package exprs
+package shared
 
 import (
 	"encoding/json"
@@ -132,16 +132,18 @@ var intervalDayType = simpleExtensionTypeFactory[intervalDayExtensionParams]{
 	},
 }
 
-func uuid() arrow.DataType { return extensions.NewUUIDType() }
-func fixedChar(length int32) arrow.DataType {
+// UUID, FixedChar, VarChar, IntervalYear, and IntervalDay return the Arrow
+// types used to represent the corresponding Substrait types.
+func UUID() arrow.DataType { return extensions.NewUUIDType() }
+func FixedChar(length int32) arrow.DataType {
 	return fixedCharType.CreateType(fixedCharExtensionParams{Length: length})
 }
-func varChar(length int32) arrow.DataType {
+func VarChar(length int32) arrow.DataType {
 	return varCharType.CreateType(varCharExtensionParams{Length: length})
 }
-func intervalYear() arrow.DataType {
+func IntervalYear() arrow.DataType {
 	return intervalYearType.CreateType(intervalYearExtensionParams{})
 }
-func intervalDay() arrow.DataType {
+func IntervalDay() arrow.DataType {
 	return intervalDayType.CreateType(intervalDayExtensionParams{})
 }

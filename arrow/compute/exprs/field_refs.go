@@ -21,24 +21,15 @@ package exprs
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
-	"github.com/apache/arrow-go/v18/arrow/internal"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs/internal/shared"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/substrait-io/substrait-go/v8/expr"
 )
-
-func getFields(typ arrow.DataType) []arrow.Field {
-	if nested, ok := typ.(arrow.NestedType); ok {
-		return nested.Fields()
-	}
-	return nil
-}
 
 // GetRefField evaluates the substrait field reference to retrieve the
 // referenced field or return an error.
@@ -66,7 +57,7 @@ func GetRefField(ref expr.ReferenceSegment, fields []arrow.Field) (*arrow.Field,
 			}
 
 			out = &fields[f.Field]
-			fields = getFields(out.Type)
+			fields = shared.ChildFields(out.Type)
 		default:
 			return nil, arrow.ErrNotImplemented
 		}
@@ -105,10 +96,10 @@ func GetScalar(ref expr.ReferenceSegment, s scalar.Scalar, mem memory.Allocator,
 	for ; ref != nil; ref = ref.GetChild() {
 		next, borrowed, err := scalarStep(ref, s, mem, ext)
 		if err == nil && borrowed {
-			retainScalar(next)
+			shared.RetainScalar(next)
 		}
 		if owned {
-			releaseScalar(s)
+			shared.ReleaseScalar(s)
 		}
 		if err != nil {
 			return nil, err
@@ -189,7 +180,7 @@ func scalarStep(ref expr.ReferenceSegment, s scalar.Scalar, mem memory.Allocator
 				return nil, false, err
 			}
 			found := scalar.Equals(kv, keyval.Value)
-			releaseScalar(kv)
+			shared.ReleaseScalar(kv)
 			if found {
 				sc, err := scalar.GetScalar(m.Field(1), i)
 				return sc, false, err
@@ -198,18 +189,6 @@ func scalarStep(ref expr.ReferenceSegment, s scalar.Scalar, mem memory.Allocator
 		return nil, false, arrow.ErrNotFound
 	}
 	return nil, false, arrow.ErrNotImplemented
-}
-
-func retainScalar(s scalar.Scalar) {
-	if r, ok := s.(scalar.Releasable); ok {
-		r.Retain()
-	}
-}
-
-func releaseScalar(s scalar.Scalar) {
-	if r, ok := s.(scalar.Releasable); ok {
-		r.Release()
-	}
 }
 
 // GetReferencedValue retrieves the referenced (potentially nested) value from
@@ -236,7 +215,7 @@ func GetReferencedValue(mem memory.Allocator, ref expr.ReferenceSegment, value c
 			)
 			if sc, borrowed, err = scalarStep(ref, v.Value, mem, ext); err == nil {
 				if borrowed {
-					retainScalar(sc)
+					shared.RetainScalar(sc)
 				}
 				next = &compute.ScalarDatum{Value: sc}
 			}
@@ -271,7 +250,7 @@ func arrayStep(mem memory.Allocator, ref expr.ReferenceSegment, v *compute.Array
 		if r.Field < 0 || r.Field >= int32(len(v.Value.Children())) {
 			return nil, fmt.Errorf("%w: indices=%s", compute.ErrIndexRange, ref)
 		}
-		field, err := structField(mem, v.Value, int(r.Field))
+		field, err := shared.StructField(mem, v.Value, int(r.Field))
 		if err != nil {
 			return nil, err
 		}
@@ -304,57 +283,4 @@ func recordStep(ref expr.ReferenceSegment, v *compute.RecordDatum) (compute.Datu
 	col := v.Value.Column(int(r.Field)).Data()
 	col.Retain()
 	return &compute.ArrayDatum{Value: col}, nil
-}
-
-// structField returns field i of a struct array as a new array: sliced to
-// the struct's offset and length, and null wherever the struct is null.
-func structField(mem memory.Allocator, parent arrow.ArrayData, i int) (arrow.ArrayData, error) {
-	off, n := parent.Offset(), parent.Len()
-	child := array.NewSliceData(parent.Children()[i], int64(off), int64(off+n))
-
-	if parent.NullN() == 0 || len(parent.Buffers()) == 0 || parent.Buffers()[0] == nil {
-		return child, nil
-	}
-	parentBits := parent.Buffers()[0].Bytes()
-	parentNulls := parent.NullN()
-	if parentNulls == array.UnknownNullCount {
-		parentNulls = n - bitutil.CountSetBits(parentBits, off, n)
-	}
-	if parentNulls == 0 {
-		return child, nil
-	}
-
-	storage := child.DataType()
-	if ext, ok := storage.(arrow.ExtensionType); ok {
-		storage = ext.StorageType()
-	}
-	if storage.ID() == arrow.NULL {
-		return child, nil
-	}
-	if !internal.DefaultHasValidityBitmap(storage.ID()) {
-		err := fmt.Errorf("%w: cannot propagate struct nulls to field type %s", arrow.ErrNotImplemented, child.DataType())
-		child.Release()
-		return nil, err
-	}
-	defer child.Release()
-
-	// keep the child's offset so its other buffers stay valid
-	cOff := child.Offset()
-	bits := memory.NewResizableBuffer(mem)
-	defer bits.Release()
-	bits.Resize(int(bitutil.BytesForBits(int64(cOff + n))))
-	if cb := child.Buffers()[0]; cb != nil {
-		bitutil.BitmapAnd(parentBits, cb.Bytes(), int64(off), int64(cOff), bits.Bytes(), int64(cOff), int64(n))
-	} else {
-		bitutil.CopyBitmap(parentBits, off, n, bits.Bytes(), cOff)
-	}
-	nulls := n - bitutil.CountSetBits(bits.Bytes(), cOff, n)
-
-	buffers := slices.Clone(child.Buffers())
-	buffers[0] = bits
-	out := array.NewData(child.DataType(), n, buffers, child.Children(), nulls, cOff)
-	if dict := child.Dictionary(); dict != nil {
-		out.SetDictionary(dict)
-	}
-	return out, nil
 }

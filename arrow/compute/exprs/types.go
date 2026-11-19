@@ -20,13 +20,14 @@ package exprs
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/internal/utils/maphash"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs/internal/shared"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs/internal/typeconv"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
@@ -45,7 +46,7 @@ const (
 	SubstraitStringFuncsURI     = SubstraitDefaultURIPrefix + "functions_string"
 
 	SubstraitIcebergSetFuncURN = "extension:apache.iceberg:functions_set"
-	TimestampTzTimezone        = "UTC"
+	TimestampTzTimezone        = typeconv.TimestampTzTimezone
 )
 
 var hashSeed maphash.Seed
@@ -155,95 +156,12 @@ func init() {
 	}
 }
 
-type overflowBehavior string
-
-const (
-	overflowSILENT   = "SILENT"
-	overflowSATURATE = "SATURATE"
-	overflowERROR    = "ERROR"
-)
-
-type enumParser[typ ~string] struct {
-	values map[typ]struct{}
-}
-
-func (e *enumParser[typ]) parse(v string) (typ, error) {
-	out := typ(v)
-	if _, ok := e.values[out]; ok {
-		return out, nil
-	}
-	return "", arrow.ErrNotFound
-}
-
-var overflowParser = enumParser[overflowBehavior]{
-	values: map[overflowBehavior]struct{}{
-		overflowSILENT:   {},
-		overflowSATURATE: {},
-		overflowERROR:    {},
-	},
-}
-
-type caseSensitivity string
-
-const (
-	caseSensitive        caseSensitivity = "CASE_SENSITIVE"
-	caseInsensitive      caseSensitivity = "CASE_INSENSITIVE"
-	caseInsensitiveASCII caseSensitivity = "CASE_INSENSITIVE_ASCII"
-)
-
-var caseSensitivityParser = enumParser[caseSensitivity]{
-	values: map[caseSensitivity]struct{}{
-		caseSensitive:        {},
-		caseInsensitive:      {},
-		caseInsensitiveASCII: {},
-	},
-}
-
-func parseOption[typ ~string](sf *expr.ScalarFunction, optionName string, parser *enumParser[typ], implemented []typ, def typ) (typ, error) {
-	opts := sf.GetOption(optionName)
-	if len(opts) == 0 {
-		return def, nil
-	}
-
-	for _, o := range opts {
-		p, err := parser.parse(o)
-		if err != nil {
-			return def, arrow.ErrInvalid
-		}
-		for _, i := range implemented {
-			if i == p {
-				return p, nil
-			}
-		}
-	}
-
-	return def, arrow.ErrNotImplemented
-}
-
 type substraitToArrow = func(*expr.ScalarFunction, []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error)
 type arrowToSubstrait = func(fname string) (extensions.ID, []*types.FunctionOption, error)
 
-var substraitToArrowFuncMap = map[string]string{
-	"lt":  "less",
-	"gt":  "greater",
-	"lte": "less_equal",
-	"gte": "greater_equal",
-	"or":  "or_kleene",
-	"and": "and_kleene",
-}
-
-var arrowToSubstraitFuncMap = map[string]string{
-	"less":          "lt",
-	"greater":       "gt",
-	"less_equal":    "lte",
-	"greater_equal": "gte",
-	"and_kleene":    "and",
-	"or_kleene":     "or",
-}
-
 func setLookupFuncSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
 	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
+	f, ok := shared.SubstraitToArrowFuncMap[fname]
 	if ok {
 		fname = f
 	}
@@ -273,8 +191,8 @@ func startsWithSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Dat
 			arrow.ErrNotImplemented, len(input))
 	}
 
-	sensitivity, err := parseOption(sf, "case_sensitivity", &caseSensitivityParser,
-		[]caseSensitivity{caseSensitive, caseInsensitive}, caseSensitive)
+	sensitivity, err := shared.ParseOption(sf.GetOption("case_sensitivity"), &shared.CaseSensitivityParser,
+		[]shared.CaseSensitivity{shared.CaseSensitive, shared.CaseInsensitive}, shared.CaseSensitive)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("%w: starts_with case_sensitivity %v", err, sf.GetOption("case_sensitivity"))
 	}
@@ -297,7 +215,7 @@ func startsWithSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Dat
 
 	return "starts_with", input[:1], &compute.MatchSubstringOptions{
 		Pattern:    string(pattern.Data()),
-		IgnoreCase: sensitivity == caseInsensitive,
+		IgnoreCase: sensitivity == shared.CaseInsensitive,
 	}, nil
 }
 
@@ -305,7 +223,7 @@ func simpleMapSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datu
 	args = input
 
 	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
+	f, ok := shared.SubstraitToArrowFuncMap[fname]
 	if ok {
 		fname = f
 	}
@@ -314,7 +232,7 @@ func simpleMapSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datu
 
 func simpleMapArrowToSubstraitFunc(urn string) arrowToSubstrait {
 	return func(fname string) (extensions.ID, []*types.FunctionOption, error) {
-		f, ok := arrowToSubstraitFuncMap[fname]
+		f, ok := shared.ArrowToSubstraitFuncMap[fname]
 		if ok {
 			fname = f
 		}
@@ -324,15 +242,15 @@ func simpleMapArrowToSubstraitFunc(urn string) arrowToSubstrait {
 
 func decodeOptionlessOverflowableArithmetic(n string) substraitToArrow {
 	return func(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-		overflow, err := parseOption(sf, "overflow", &overflowParser, []overflowBehavior{overflowSILENT, overflowERROR}, overflowSILENT)
+		overflow, err := shared.ParseOption(sf.GetOption("overflow"), &shared.OverflowParser, []shared.OverflowBehavior{shared.OverflowSilent, shared.OverflowError}, shared.OverflowSilent)
 		if err != nil {
 			return n, input, nil, err
 		}
 
 		switch overflow {
-		case overflowSILENT:
+		case shared.OverflowSilent:
 			return n + "_unchecked", input, nil, nil
-		case overflowERROR:
+		case shared.OverflowError:
 			return n, input, nil, nil
 		default:
 			return n, input, nil, arrow.ErrNotImplemented
@@ -586,212 +504,23 @@ func IsNullable(t types.Type) bool {
 // FieldsFromSubstrait produces a list of arrow fields from a list of
 // substrait types (such as the fields of a StructType) using nextName
 // to determine the names for the fields.
-func FieldsFromSubstrait(typeList []types.Type, nextName func() string, ext ExtensionIDSet) (out []arrow.Field, err error) {
-	out = make([]arrow.Field, len(typeList))
-	for i, t := range typeList {
-		out[i].Name = nextName()
-		out[i].Nullable = IsNullable(t)
-
-		if st, ok := t.(*types.StructType); ok {
-			fields, err := FieldsFromSubstrait(st.Types, nextName, ext)
-			if err != nil {
-				return nil, err
-			}
-			out[i].Type = arrow.StructOf(fields...)
-		} else {
-			out[i].Type, _, err = FromSubstraitType(t, ext)
-			if err != nil {
-				return nil, err
-			}
-		}
+func FieldsFromSubstrait(typeList []types.Type, nextName func() string, ext ExtensionIDSet) ([]arrow.Field, error) {
+	converted, err := toV9Types(typeList)
+	if err != nil {
+		return nil, err
 	}
-	return
-}
-
-func substraitToArrowTimeUnit(in types.TimePrecision) arrow.TimeUnit {
-	return arrow.TimeUnit(in / 3)
+	return typeconv.FieldsFromSubstrait(converted, nextName, typeAnchors{ext})
 }
 
 // ToSubstraitType converts an arrow data type to a Substrait Type. Since
 // arrow types don't have a nullable flag (it is in the arrow.Field) but
 // Substrait types do, the nullability must be passed in here.
 func ToSubstraitType(dt arrow.DataType, nullable bool, ext ExtensionIDSet) (types.Type, error) {
-	var nullability types.Nullability
-	if nullable {
-		nullability = types.NullabilityNullable
-	} else {
-		nullability = types.NullabilityRequired
+	t, err := typeconv.ToSubstraitType(dt, nullable, typeAnchors{ext})
+	if err != nil {
+		return nil, err
 	}
-
-	switch dt.ID() {
-	case arrow.BOOL:
-		return &types.BooleanType{Nullability: nullability}, nil
-	case arrow.INT8:
-		return &types.Int8Type{Nullability: nullability}, nil
-	case arrow.INT16:
-		return &types.Int16Type{Nullability: nullability}, nil
-	case arrow.INT32:
-		return &types.Int32Type{Nullability: nullability}, nil
-	case arrow.INT64:
-		return &types.Int64Type{Nullability: nullability}, nil
-	case arrow.UINT8:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int8Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT16:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int16Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT32:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int32Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT64:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int64Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.FLOAT16:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int16Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.FLOAT32:
-		return &types.Float32Type{Nullability: nullability}, nil
-	case arrow.FLOAT64:
-		return &types.Float64Type{Nullability: nullability}, nil
-	case arrow.STRING, arrow.LARGE_STRING:
-		return &types.StringType{Nullability: nullability}, nil
-	case arrow.BINARY, arrow.LARGE_BINARY:
-		return &types.BinaryType{Nullability: nullability}, nil
-	case arrow.DATE32:
-		return &types.DateType{Nullability: nullability}, nil
-	case arrow.EXTENSION:
-		dt := dt.(arrow.ExtensionType)
-		switch dt.ExtensionName() {
-		case "uuid":
-			return &types.UUIDType{Nullability: nullability}, nil
-		case "fixed_char":
-			return &types.FixedCharType{
-				Nullability: nullability,
-				Length:      int32(dt.StorageType().(*arrow.FixedSizeBinaryType).ByteWidth),
-			}, nil
-		case "varchar":
-			return &types.VarCharType{Nullability: nullability, Length: -1}, nil
-		case "interval_year":
-			return &types.IntervalYearType{Nullability: nullability}, nil
-		case "interval_day":
-			return &types.IntervalDayType{Nullability: nullability}, nil
-		default:
-			_, anchor, ok := ext.EncodeType(dt)
-			if !ok {
-				return nil, arrow.ErrNotFound
-			}
-			return &types.UserDefinedType{
-				Nullability:   nullability,
-				TypeReference: anchor,
-			}, nil
-		}
-	case arrow.FIXED_SIZE_BINARY:
-		return &types.FixedBinaryType{Nullability: nullability,
-			Length: int32(dt.(*arrow.FixedSizeBinaryType).ByteWidth)}, nil
-	case arrow.DECIMAL128, arrow.DECIMAL256:
-		dt := dt.(arrow.DecimalType)
-		return &types.DecimalType{Nullability: nullability,
-			Precision: dt.GetPrecision(), Scale: dt.GetScale()}, nil
-	case arrow.STRUCT:
-		dt := dt.(*arrow.StructType)
-		fields := make([]types.Type, dt.NumFields())
-		var err error
-		for i, f := range dt.Fields() {
-			fields[i], err = ToSubstraitType(f.Type, f.Nullable, ext)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return &types.StructType{
-			Nullability: nullability,
-			Types:       fields,
-		}, nil
-	case arrow.LIST, arrow.FIXED_SIZE_LIST, arrow.LARGE_LIST:
-		dt := dt.(arrow.NestedType)
-		elemType, err := ToSubstraitType(dt.Fields()[0].Type, dt.Fields()[0].Nullable, ext)
-		if err != nil {
-			return nil, err
-		}
-		return &types.ListType{
-			Nullability: nullability,
-			Type:        elemType,
-		}, nil
-	case arrow.MAP:
-		dt := dt.(*arrow.MapType)
-		keyType, err := ToSubstraitType(dt.KeyType(), false, ext)
-		if err != nil {
-			return nil, err
-		}
-		valueType, err := ToSubstraitType(dt.ItemType(), dt.ItemField().Nullable, ext)
-		if err != nil {
-			return nil, err
-		}
-
-		return &types.MapType{
-			Nullability: nullability,
-			Key:         keyType,
-			Value:       valueType,
-		}, nil
-	case arrow.TIME32:
-		unit := dt.(*arrow.Time32Type).Unit
-		return &types.PrecisionTimeType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(unit * 3),
-		}, nil
-	case arrow.TIME64:
-		unit := dt.(*arrow.Time64Type).Unit
-		return &types.PrecisionTimeType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(unit * 3),
-		}, nil
-	case arrow.TIMESTAMP:
-		dt := dt.(*arrow.TimestampType)
-		if dt.TimeZone != "" {
-			return &types.PrecisionTimestampTzType{
-				PrecisionTimestampType: types.PrecisionTimestampType{
-					Nullability: nullability,
-					Precision:   types.TimePrecision(dt.Unit * 3),
-				},
-			}, nil
-		}
-		return &types.PrecisionTimestampType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(dt.Unit * 3),
-		}, nil
-	}
-
-	return nil, arrow.ErrNotImplemented
+	return fromV9Type(t)
 }
 
 // FromSubstraitType returns the appropriate Arrow data type for the given
@@ -799,140 +528,27 @@ func ToSubstraitType(dt arrow.DataType, nullable bool, ext ExtensionIDSet) (type
 // Since Substrait types contain their nullability also, the nullability
 // returned along with the data type.
 func FromSubstraitType(t types.Type, ext ExtensionIDSet) (arrow.DataType, bool, error) {
-	nullable := IsNullable(t)
-
-	if t.GetTypeVariationReference() > 0 {
-		_, dt, ok := ext.DecodeTypeArrow(t.GetTypeVariationReference())
-		if ok {
-			return dt, nullable, nil
-		}
+	converted, err := toV9Type(t)
+	if err != nil {
+		return nil, false, err
 	}
+	return typeconv.FromSubstraitType(converted, typeAnchors{ext})
+}
 
-	switch t := t.(type) {
-	case *types.BooleanType:
-		return arrow.FixedWidthTypes.Boolean, nullable, nil
-	case *types.Int8Type:
-		return arrow.PrimitiveTypes.Int8, nullable, nil
-	case *types.Int16Type:
-		return arrow.PrimitiveTypes.Int16, nullable, nil
-	case *types.Int32Type:
-		return arrow.PrimitiveTypes.Int32, nullable, nil
-	case *types.Int64Type:
-		return arrow.PrimitiveTypes.Int64, nullable, nil
-	case *types.Float32Type:
-		return arrow.PrimitiveTypes.Float32, nullable, nil
-	case *types.Float64Type:
-		return arrow.PrimitiveTypes.Float64, nullable, nil
-	case *types.StringType:
-		return arrow.BinaryTypes.String, nullable, nil
-	case *types.BinaryType:
-		return arrow.BinaryTypes.Binary, nullable, nil
-	case *types.PrecisionTimeType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.Time32Type{Unit: arrow.Second}, nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.Time32Type{Unit: arrow.Millisecond}, nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.Time64Type{Unit: arrow.Nanosecond}, nullable, nil
-		}
-	case *types.PrecisionTimestampType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.TimestampType{Unit: arrow.Second}, nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.TimestampType{Unit: arrow.Millisecond}, nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.TimestampType{Unit: arrow.Microsecond}, nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.TimestampType{Unit: arrow.Nanosecond}, nullable, nil
-		}
-	case *types.PrecisionTimestampTzType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.TimestampType{Unit: arrow.Second, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		}
-	case *types.TimestampType:
-		return &arrow.TimestampType{Unit: arrow.Microsecond}, nullable, nil
-	case *types.TimestampTzType:
-		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: TimestampTzTimezone},
-			nullable, nil
-	case *types.DateType:
-		return arrow.FixedWidthTypes.Date32, nullable, nil
-	case *types.TimeType:
-		return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil
-	case *types.IntervalYearType:
-		return intervalYear(), nullable, nil
-	case *types.IntervalDayType:
-		return intervalDay(), nullable, nil
-	case *types.UUIDType:
-		return uuid(), nullable, nil
-	case *types.FixedCharType:
-		return fixedChar(t.Length), nullable, nil
-	case *types.VarCharType:
-		return varChar(t.Length), nullable, nil
-	case *types.FixedBinaryType:
-		return &arrow.FixedSizeBinaryType{ByteWidth: int(t.Length)}, nullable, nil
-	case *types.DecimalType:
-		return &arrow.Decimal128Type{
-			Precision: t.Precision,
-			Scale:     t.Scale,
-		}, nullable, nil
-	case *types.StructType:
-		i := 0
-		fields, err := FieldsFromSubstrait(t.Types, func() string {
-			i++
-			return strconv.Itoa(i)
-		}, ext)
-		if err != nil {
-			return nil, false, err
-		}
+// typeAnchors adapts an ExtensionIDSet to typeconv.TypeAnchors.
+type typeAnchors struct{ ext ExtensionIDSet }
 
-		return arrow.StructOf(fields...), nullable, nil
-	case *types.ListType:
-		elem, elemNullable, err := FromSubstraitType(t.Type, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		return arrow.ListOfField(arrow.Field{Name: "item", Type: elem, Nullable: elemNullable}),
-			nullable, nil
-	case *types.MapType:
-		key, keyNullable, err := FromSubstraitType(t.Key, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		if keyNullable {
-			return nil, false, fmt.Errorf("%w: encountered nullable key field when converting to arrow.Map",
-				arrow.ErrInvalid)
-		}
+func (a typeAnchors) DecodeTypeArrow(anchor uint32) (arrow.DataType, bool) {
+	_, dt, ok := a.ext.DecodeTypeArrow(anchor)
+	return dt, ok
+}
 
-		value, valueNullable, err := FromSubstraitType(t.Value, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		ret := arrow.MapOf(key, value)
-		ret.SetItemNullable(valueNullable)
-		return ret, nullable, nil
-	case *types.UserDefinedType:
-		anchor := t.TypeReference
-		_, dt, ok := ext.DecodeTypeArrow(anchor)
-		if !ok {
-			return nil, false, arrow.ErrNotImplemented
-		}
-		return dt, nullable, nil
-	}
+func (a typeAnchors) EncodeType(dt arrow.DataType) (uint32, bool) {
+	_, anchor, ok := a.ext.EncodeType(dt)
+	return anchor, ok
+}
 
-	return nil, false, arrow.ErrNotImplemented
+func (a typeAnchors) EncodeTypeVariation(dt arrow.DataType) (uint32, bool) {
+	_, anchor, ok := a.ext.EncodeTypeVariation(dt)
+	return anchor, ok
 }
