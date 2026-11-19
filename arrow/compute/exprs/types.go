@@ -16,18 +16,17 @@
 
 //go:build go1.18
 
+// Package exprs is the substrait-go v8 API. It converts its inputs to
+// substrait-go v9 and delegates to the implementation in exprs/v9.
 package exprs
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
-
-	"github.com/apache/arrow-go/v18/internal/utils/maphash"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
-	"github.com/apache/arrow-go/v18/arrow/scalar"
+	core "github.com/apache/arrow-go/v18/arrow/compute/exprs/v9"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
 	"github.com/substrait-io/substrait-go/v8/types"
@@ -35,331 +34,26 @@ import (
 
 const (
 	// URN for official Arrow Substrait Extension Types
-	ArrowExtTypesUrn          = "https://github.com/apache/arrow/blob/main/format/substrait/extension_types.yaml"
-	SubstraitDefaultURIPrefix = extensions.SubstraitDefaultURNPrefix
+	ArrowExtTypesUrn          = core.ArrowExtTypesUrn
+	SubstraitDefaultURIPrefix = core.SubstraitDefaultURIPrefix
 	// URN for official Substrait Arithmetic funcs extensions
-	SubstraitArithmeticFuncsURI = SubstraitDefaultURIPrefix + "functions_arithmetic"
+	SubstraitArithmeticFuncsURI = core.SubstraitArithmeticFuncsURI
 	// URN for official Substrait Comparison funcs extensions
-	SubstraitComparisonFuncsURI = SubstraitDefaultURIPrefix + "functions_comparison"
-	SubstraitBooleanFuncsURI    = SubstraitDefaultURIPrefix + "functions_boolean"
-	SubstraitStringFuncsURI     = SubstraitDefaultURIPrefix + "functions_string"
+	SubstraitComparisonFuncsURI = core.SubstraitComparisonFuncsURI
+	SubstraitBooleanFuncsURI    = core.SubstraitBooleanFuncsURI
+	SubstraitStringFuncsURI     = core.SubstraitStringFuncsURI
 
-	SubstraitIcebergSetFuncURN = "extension:apache.iceberg:functions_set"
-	TimestampTzTimezone        = "UTC"
+	SubstraitIcebergSetFuncURN = core.SubstraitIcebergSetFuncURN
+	TimestampTzTimezone        = core.TimestampTzTimezone
 )
-
-var hashSeed maphash.Seed
 
 // the default extension registry that will contain the Arrow extension
-// type variations and types.
-var DefaultExtensionIDRegistry = NewExtensionIDRegistry()
-
-func init() {
-	hashSeed = maphash.MakeSeed()
-
-	types := []struct {
-		dt   arrow.DataType
-		name string
-	}{
-		{arrow.PrimitiveTypes.Uint8, "u8"},
-		{arrow.PrimitiveTypes.Uint16, "u16"},
-		{arrow.PrimitiveTypes.Uint32, "u32"},
-		{arrow.PrimitiveTypes.Uint64, "u64"},
-		{arrow.FixedWidthTypes.Float16, "fp16"},
-		{arrow.Null, "null"},
-		{arrow.FixedWidthTypes.MonthInterval, "interval_month"},
-		{arrow.FixedWidthTypes.DayTimeInterval, "interval_day_milli"},
-		{arrow.FixedWidthTypes.MonthDayNanoInterval, "interval_month_day_nano"},
-	}
-
-	for _, t := range types {
-		err := DefaultExtensionIDRegistry.RegisterType(extensions.ID{
-			URN: ArrowExtTypesUrn, Name: t.name}, t.dt)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"add", "subtract", "multiply", "divide", "power", "sqrt", "abs"} {
-		err := DefaultExtensionIDRegistry.AddSubstraitScalarToArrow(
-			extensions.ID{URN: SubstraitArithmeticFuncsURI, Name: fn},
-			decodeOptionlessOverflowableArithmetic(fn))
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"add", "subtract", "multiply", "divide"} {
-		err := DefaultExtensionIDRegistry.AddArrowToSubstrait(fn,
-			encodeOptionlessOverflowableArithmetic(extensions.ID{
-				URN: SubstraitArithmeticFuncsURI, Name: fn}))
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"equal", "not_equal", "lt", "lte", "gt", "gte", "is_null", "is_not_null", "is_nan"} {
-		err := DefaultExtensionIDRegistry.AddSubstraitScalarToArrow(
-			extensions.ID{URN: SubstraitComparisonFuncsURI, Name: fn},
-			simpleMapSubstraitToArrowFunc)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"equal", "not_equal", "less", "less_equal", "greater", "greater_equal", "is_null", "is_not_null", "is_nan"} {
-		err := DefaultExtensionIDRegistry.AddArrowToSubstrait(fn,
-			simpleMapArrowToSubstraitFunc(SubstraitComparisonFuncsURI))
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"and", "or", "not"} {
-		err := DefaultExtensionIDRegistry.AddSubstraitScalarToArrow(
-			extensions.ID{URN: SubstraitBooleanFuncsURI, Name: fn},
-			simpleMapSubstraitToArrowFunc)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"and_kleene", "or_kleene", "not"} {
-		err := DefaultExtensionIDRegistry.AddArrowToSubstrait(fn,
-			simpleMapArrowToSubstraitFunc(SubstraitBooleanFuncsURI))
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, fn := range []string{"is_in"} {
-		err := DefaultExtensionIDRegistry.AddSubstraitScalarToArrow(
-			extensions.ID{URN: SubstraitIcebergSetFuncURN, Name: fn},
-			setLookupFuncSubstraitToArrowFunc)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	err := DefaultExtensionIDRegistry.AddSubstraitScalarToArrow(
-		extensions.ID{URN: SubstraitStringFuncsURI, Name: "starts_with"},
-		startsWithSubstraitToArrowFunc)
-	if err != nil {
-		panic(err)
-	}
-
-	err = DefaultExtensionIDRegistry.AddArrowToSubstrait("starts_with",
-		simpleMapArrowToSubstraitFunc(SubstraitStringFuncsURI))
-	if err != nil {
-		panic(err)
-	}
-}
-
-type overflowBehavior string
-
-const (
-	overflowSILENT   = "SILENT"
-	overflowSATURATE = "SATURATE"
-	overflowERROR    = "ERROR"
-)
-
-type enumParser[typ ~string] struct {
-	values map[typ]struct{}
-}
-
-func (e *enumParser[typ]) parse(v string) (typ, error) {
-	out := typ(v)
-	if _, ok := e.values[out]; ok {
-		return out, nil
-	}
-	return "", arrow.ErrNotFound
-}
-
-var overflowParser = enumParser[overflowBehavior]{
-	values: map[overflowBehavior]struct{}{
-		overflowSILENT:   {},
-		overflowSATURATE: {},
-		overflowERROR:    {},
-	},
-}
-
-type caseSensitivity string
-
-const (
-	caseSensitive        caseSensitivity = "CASE_SENSITIVE"
-	caseInsensitive      caseSensitivity = "CASE_INSENSITIVE"
-	caseInsensitiveASCII caseSensitivity = "CASE_INSENSITIVE_ASCII"
-)
-
-var caseSensitivityParser = enumParser[caseSensitivity]{
-	values: map[caseSensitivity]struct{}{
-		caseSensitive:        {},
-		caseInsensitive:      {},
-		caseInsensitiveASCII: {},
-	},
-}
-
-func parseOption[typ ~string](sf *expr.ScalarFunction, optionName string, parser *enumParser[typ], implemented []typ, def typ) (typ, error) {
-	opts := sf.GetOption(optionName)
-	if len(opts) == 0 {
-		return def, nil
-	}
-
-	for _, o := range opts {
-		p, err := parser.parse(o)
-		if err != nil {
-			return def, arrow.ErrInvalid
-		}
-		for _, i := range implemented {
-			if i == p {
-				return p, nil
-			}
-		}
-	}
-
-	return def, arrow.ErrNotImplemented
-}
+// type variations and types. It shares its types and built-in function
+// mappings with the exprs/v9 default registry.
+var DefaultExtensionIDRegistry = wrapRegistry(core.DefaultExtensionIDRegistry)
 
 type substraitToArrow = func(*expr.ScalarFunction, []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error)
 type arrowToSubstrait = func(fname string) (extensions.ID, []*types.FunctionOption, error)
-
-var substraitToArrowFuncMap = map[string]string{
-	"lt":  "less",
-	"gt":  "greater",
-	"lte": "less_equal",
-	"gte": "greater_equal",
-	"or":  "or_kleene",
-	"and": "and_kleene",
-}
-
-var arrowToSubstraitFuncMap = map[string]string{
-	"less":          "lt",
-	"greater":       "gt",
-	"less_equal":    "lte",
-	"greater_equal": "gte",
-	"and_kleene":    "and",
-	"or_kleene":     "or",
-}
-
-func setLookupFuncSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
-	if ok {
-		fname = f
-	}
-
-	setopts := &compute.SetOptions{
-		NullBehavior: compute.NullMatchingMatch,
-	}
-	switch input[1].Kind() {
-	case compute.KindArray, compute.KindChunked:
-		setopts.ValueSet = input[1]
-	case compute.KindScalar:
-		// should be a list scalar
-		setopts.ValueSet = compute.NewDatumWithoutOwning(
-			input[1].(*compute.ScalarDatum).Value.(*scalar.List).Value)
-	}
-
-	args, opts = input[0:1], setopts
-	return
-}
-
-// startsWithSubstraitToArrowFunc maps CASE_INSENSITIVE to IgnoreCase.
-// A case_sensitivity preference list with only CASE_INSENSITIVE_ASCII
-// returns an error wrapping arrow.ErrNotImplemented.
-func startsWithSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-	if len(input) != 2 {
-		return "", nil, nil, fmt.Errorf("%w: starts_with expects 2 arguments, got %d",
-			arrow.ErrNotImplemented, len(input))
-	}
-
-	sensitivity, err := parseOption(sf, "case_sensitivity", &caseSensitivityParser,
-		[]caseSensitivity{caseSensitive, caseInsensitive}, caseSensitive)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("%w: starts_with case_sensitivity %v", err, sf.GetOption("case_sensitivity"))
-	}
-
-	if _, ok := sf.Arg(1).(expr.Literal); !ok {
-		return "", nil, nil, fmt.Errorf("%w: starts_with pattern must be a literal", arrow.ErrNotImplemented)
-	}
-
-	sc := input[1].(*compute.ScalarDatum).Value
-	if !sc.IsValid() {
-		return "", nil, nil, fmt.Errorf("%w: starts_with pattern must not be null", arrow.ErrNotImplemented)
-	}
-	if ext, ok := sc.(*scalar.Extension); ok {
-		sc = ext.Value
-	}
-	pattern, ok := sc.(scalar.BinaryScalar)
-	if !ok {
-		return "", nil, nil, fmt.Errorf("%w: starts_with pattern of type %s", arrow.ErrNotImplemented, sc.DataType())
-	}
-
-	return "starts_with", input[:1], &compute.MatchSubstringOptions{
-		Pattern:    string(pattern.Data()),
-		IgnoreCase: sensitivity == caseInsensitive,
-	}, nil
-}
-
-func simpleMapSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-	args = input
-
-	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
-	if ok {
-		fname = f
-	}
-	return
-}
-
-func simpleMapArrowToSubstraitFunc(urn string) arrowToSubstrait {
-	return func(fname string) (extensions.ID, []*types.FunctionOption, error) {
-		f, ok := arrowToSubstraitFuncMap[fname]
-		if ok {
-			fname = f
-		}
-		return extensions.ID{URN: urn, Name: fname}, nil, nil
-	}
-}
-
-func decodeOptionlessOverflowableArithmetic(n string) substraitToArrow {
-	return func(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-		overflow, err := parseOption(sf, "overflow", &overflowParser, []overflowBehavior{overflowSILENT, overflowERROR}, overflowSILENT)
-		if err != nil {
-			return n, input, nil, err
-		}
-
-		switch overflow {
-		case overflowSILENT:
-			return n + "_unchecked", input, nil, nil
-		case overflowERROR:
-			return n, input, nil, nil
-		default:
-			return n, input, nil, arrow.ErrNotImplemented
-		}
-	}
-}
-
-func encodeOptionlessOverflowableArithmetic(id extensions.ID) arrowToSubstrait {
-	return func(fname string) (extensions.ID, []*types.FunctionOption, error) {
-		fn, _, ok := strings.Cut(fname, ":")
-		if ok {
-			id.Name = fname
-			fname = fn
-		}
-
-		opts := make([]*types.FunctionOption, 0, 1)
-		if strings.HasSuffix(fname, "_unchecked") {
-			opts = append(opts, &types.FunctionOption{
-				Name: "overflow", Preference: []string{"SILENT"}})
-		} else {
-			opts = append(opts, &types.FunctionOption{
-				Name: "overflow", Preference: []string{"ERROR"}})
-		}
-
-		return id, opts, nil
-	}
-}
 
 // NewExtensionSetDefault is a convenience function to create a new extension
 // set using the Default arrow extension ID registry.
@@ -396,15 +90,8 @@ func (e *extensionSet) GetArrowRegistry() *ExtensionIDRegistry       { return e.
 func (e *extensionSet) GetSubstraitRegistry() expr.ExtensionRegistry { return e.ExtensionRegistry }
 
 func (e *extensionSet) DecodeTypeArrow(anchor uint32) (extensions.ID, arrow.DataType, bool) {
-	id, ok := e.DecodeType(anchor)
-	if !ok {
-		if id, ok = e.DecodeTypeVariation(anchor); !ok {
-			return id, nil, false
-		}
-	}
-
-	dt, ok := e.reg.GetTypeByID(id)
-	return id, dt, ok
+	id, dt, ok := coreExtensionSet(e).DecodeTypeArrow(anchor)
+	return extensions.ID(id), dt, ok
 }
 
 func (e *extensionSet) DecodeFunction(ref uint32) (extensions.ID, substraitToArrow, bool) {
@@ -424,21 +111,13 @@ func (e *extensionSet) DecodeFunction(ref uint32) (extensions.ID, substraitToArr
 }
 
 func (e *extensionSet) EncodeTypeVariation(dt arrow.DataType) (extensions.ID, uint32, bool) {
-	id, ok := e.reg.GetIDByType(dt)
-	if !ok {
-		return extensions.ID{}, 0, false
-	}
-
-	return id, e.GetTypeVariationAnchor(id), true
+	id, anchor, ok := coreExtensionSet(e).EncodeTypeVariation(dt)
+	return extensions.ID(id), anchor, ok
 }
 
 func (e *extensionSet) EncodeType(dt arrow.DataType) (extensions.ID, uint32, bool) {
-	id, ok := e.reg.GetIDByType(dt)
-	if !ok {
-		return extensions.ID{}, 0, false
-	}
-
-	return id, e.GetTypeAnchor(id), true
+	id, anchor, ok := coreExtensionSet(e).EncodeType(dt)
+	return extensions.ID(id), anchor, ok
 }
 
 func (e *extensionSet) EncodeFunction(id extensions.ID) uint32 {
@@ -447,12 +126,12 @@ func (e *extensionSet) EncodeFunction(id extensions.ID) uint32 {
 
 // ExtensionIDRegistry manages a set of mappings between Arrow types
 // and functions and their substrait equivalents.
+//
+// Types and the built-in function mappings live in the wrapped exprs/v9
+// registry. Function mappings added through this API are kept here, since
+// their callbacks use substrait-go v8 types.
 type ExtensionIDRegistry struct {
-	typeList []arrow.DataType
-	ids      []extensions.ID
-
-	substraitToIdx map[extensions.ID]int
-	arrowToIdx     map[uint64]int
+	core *core.ExtensionIDRegistry
 
 	substraitToArrowFn map[extensions.ID]substraitToArrow
 	arrowToSubstrait   map[string]arrowToSubstrait
@@ -460,11 +139,12 @@ type ExtensionIDRegistry struct {
 
 // NewExtensionIDRegistry initializes a new registry for use.
 func NewExtensionIDRegistry() *ExtensionIDRegistry {
+	return wrapRegistry(core.NewExtensionIDRegistry())
+}
+
+func wrapRegistry(reg *core.ExtensionIDRegistry) *ExtensionIDRegistry {
 	return &ExtensionIDRegistry{
-		typeList:           make([]arrow.DataType, 0),
-		ids:                make([]extensions.ID, 0),
-		substraitToIdx:     make(map[extensions.ID]int),
-		arrowToIdx:         make(map[uint64]int),
+		core:               reg,
 		substraitToArrowFn: make(map[extensions.ID]substraitToArrow),
 		arrowToSubstrait:   make(map[string]arrowToSubstrait),
 	}
@@ -474,21 +154,7 @@ func NewExtensionIDRegistry() *ExtensionIDRegistry {
 // provided Arrow data type. If this extension ID or arrow type are already
 // registered, an arrow.ErrInvalid error will be returned.
 func (e *ExtensionIDRegistry) RegisterType(id extensions.ID, dt arrow.DataType) error {
-	if _, ok := e.substraitToIdx[id]; ok {
-		return fmt.Errorf("%w: type id already registered", arrow.ErrInvalid)
-	}
-
-	dthash := arrow.HashType(hashSeed, dt)
-	if _, ok := e.arrowToIdx[dthash]; ok {
-		return fmt.Errorf("%w: type already registered", arrow.ErrInvalid)
-	}
-
-	idx := len(e.ids)
-	e.typeList = append(e.typeList, dt)
-	e.ids = append(e.ids, id)
-	e.substraitToIdx[id] = idx
-	e.arrowToIdx[dthash] = idx
-	return nil
+	return e.core.RegisterType(core.ExtensionID(id), dt)
 }
 
 // AddSubstraitScalarToArrow creates a mapping between a given extension ID
@@ -500,7 +166,8 @@ func (e *ExtensionIDRegistry) RegisterType(id extensions.ID, dt arrow.DataType) 
 // and used to ensure the correct arrow compute function is used and necessary
 // options are passed.
 func (e *ExtensionIDRegistry) AddSubstraitScalarToArrow(id extensions.ID, toArrow substraitToArrow) error {
-	if _, ok := e.substraitToArrowFn[id]; ok {
+	_, isBuiltIn := e.core.GetSubstraitScalarToArrow(core.FunctionID(id))
+	if _, ok := e.substraitToArrowFn[id]; ok || isBuiltIn {
 		return fmt.Errorf("%w: extension id already registered as function", arrow.ErrInvalid)
 	}
 
@@ -512,7 +179,8 @@ func (e *ExtensionIDRegistry) AddSubstraitScalarToArrow(id extensions.ID, toArro
 // and a function which should provide the correct substrait ExtensionID and function
 // options from that name.
 func (e *ExtensionIDRegistry) AddArrowToSubstrait(name string, fn arrowToSubstrait) error {
-	if _, ok := e.arrowToSubstrait[name]; ok {
+	_, isBuiltIn := e.core.GetArrowToSubstrait(name)
+	if _, ok := e.arrowToSubstrait[name]; ok || isBuiltIn {
 		return fmt.Errorf("%w: function name '%s' already registered for conversion to substrait", arrow.ErrInvalid, name)
 	}
 
@@ -524,25 +192,15 @@ func (e *ExtensionIDRegistry) AddArrowToSubstrait(name string, fn arrowToSubstra
 // extension id. If no mapping exists for this substrait extension id,
 // the second return value will be false.
 func (e *ExtensionIDRegistry) GetTypeByID(id extensions.ID) (arrow.DataType, bool) {
-	idx, ok := e.substraitToIdx[id]
-	if !ok {
-		return nil, false
-	}
-
-	return e.typeList[idx], true
+	return e.core.GetTypeByID(core.ExtensionID(id))
 }
 
 // GetIDByType is the inverse of GetTypeByID, returning the mapped substrait
 // extension ID corresponding to the provided arrow data type. The second
 // return is false if there is no mapping found.
 func (e *ExtensionIDRegistry) GetIDByType(typ arrow.DataType) (extensions.ID, bool) {
-	dthash := arrow.HashType(hashSeed, typ)
-	idx, ok := e.arrowToIdx[dthash]
-	if !ok {
-		return extensions.ID{}, false
-	}
-
-	return e.ids[idx], true
+	id, ok := e.core.GetIDByType(typ)
+	return extensions.ID(id), ok
 }
 
 // GetSubstraitScalarToArrow returns the mapped conversion function for a
@@ -550,26 +208,63 @@ func (e *ExtensionIDRegistry) GetIDByType(typ arrow.DataType) (extensions.ID, bo
 // the corresponding Arrow compute function call. False is returned as
 // the second value if there is no mapping available.
 func (e *ExtensionIDRegistry) GetSubstraitScalarToArrow(id extensions.ID) (substraitToArrow, bool) {
-	conv, ok := e.substraitToArrowFn[id]
-	if !ok {
-		return nil, ok
+	if conv, ok := e.substraitToArrowFn[id]; ok {
+		return conv, true
 	}
 
-	return conv, true
+	conv, ok := e.core.GetSubstraitScalarToArrow(core.FunctionID(id))
+	if !ok {
+		return nil, false
+	}
+	return func(sf *expr.ScalarFunction, args []compute.Datum) (string, []compute.Datum, compute.FunctionOptions, error) {
+		converted, err := newExprConverter().scalarFunction(sf)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		return conv(converted, args)
+	}, true
 }
 
 // GetArrowToSubstrait returns the mapped function to convert an arrow compute
 // function to the corresponding Substrait ScalarFunction extension ID and options.
 // False is returned as the second value if there is no mapping found.
-func (e *ExtensionIDRegistry) GetArrowToSubstrait(name string) (conv arrowToSubstrait, ok bool) {
-	conv, ok = e.arrowToSubstrait[name]
-	if !ok {
-		fn, _, found := strings.Cut(name, ":")
-		if found {
-			conv, ok = e.arrowToSubstrait[fn]
-		}
+func (e *ExtensionIDRegistry) GetArrowToSubstrait(name string) (arrowToSubstrait, bool) {
+	if conv, ok := e.customArrowToSubstrait(name); ok {
+		return conv, true
 	}
-	return
+
+	conv, ok := e.core.GetArrowToSubstrait(name)
+	if !ok {
+		return nil, false
+	}
+	return func(fname string) (extensions.ID, []*types.FunctionOption, error) {
+		id, opts, err := conv(fname)
+		return extensions.ID(id), fromV9FunctionOptions(opts), err
+	}, true
+}
+
+func (e *ExtensionIDRegistry) customArrowToSubstrait(name string) (arrowToSubstrait, bool) {
+	if conv, ok := e.arrowToSubstrait[name]; ok {
+		return conv, true
+	}
+	if fn, _, found := strings.Cut(name, ":"); found {
+		conv, ok := e.arrowToSubstrait[fn]
+		return conv, ok
+	}
+	return nil, false
+}
+
+// customSubstraitToArrow returns a mapping added through
+// AddSubstraitScalarToArrow, falling back to the function's simple name.
+func (e *ExtensionIDRegistry) customSubstraitToArrow(id extensions.ID) (substraitToArrow, bool) {
+	if conv, ok := e.substraitToArrowFn[id]; ok {
+		return conv, true
+	}
+	if name, _, found := strings.Cut(id.Name, ":"); found {
+		conv, ok := e.substraitToArrowFn[extensions.ID{URN: id.URN, Name: name}]
+		return conv, ok
+	}
+	return nil, false
 }
 
 // ExtensionIDSet is an interface for managing the mapping between arrow
@@ -594,212 +289,23 @@ func IsNullable(t types.Type) bool {
 // FieldsFromSubstrait produces a list of arrow fields from a list of
 // substrait types (such as the fields of a StructType) using nextName
 // to determine the names for the fields.
-func FieldsFromSubstrait(typeList []types.Type, nextName func() string, ext ExtensionIDSet) (out []arrow.Field, err error) {
-	out = make([]arrow.Field, len(typeList))
-	for i, t := range typeList {
-		out[i].Name = nextName()
-		out[i].Nullable = IsNullable(t)
-
-		if st, ok := t.(*types.StructType); ok {
-			fields, err := FieldsFromSubstrait(st.Types, nextName, ext)
-			if err != nil {
-				return nil, err
-			}
-			out[i].Type = arrow.StructOf(fields...)
-		} else {
-			out[i].Type, _, err = FromSubstraitType(t, ext)
-			if err != nil {
-				return nil, err
-			}
-		}
+func FieldsFromSubstrait(typeList []types.Type, nextName func() string, ext ExtensionIDSet) ([]arrow.Field, error) {
+	converted, err := toV9Types(typeList)
+	if err != nil {
+		return nil, err
 	}
-	return
-}
-
-func substraitToArrowTimeUnit(in types.TimePrecision) arrow.TimeUnit {
-	return arrow.TimeUnit(in / 3)
+	return core.FieldsFromSubstrait(converted, nextName, coreExtensionSet(ext))
 }
 
 // ToSubstraitType converts an arrow data type to a Substrait Type. Since
 // arrow types don't have a nullable flag (it is in the arrow.Field) but
 // Substrait types do, the nullability must be passed in here.
 func ToSubstraitType(dt arrow.DataType, nullable bool, ext ExtensionIDSet) (types.Type, error) {
-	var nullability types.Nullability
-	if nullable {
-		nullability = types.NullabilityNullable
-	} else {
-		nullability = types.NullabilityRequired
+	converted, err := core.ToSubstraitType(dt, nullable, coreExtensionSet(ext))
+	if err != nil {
+		return nil, err
 	}
-
-	switch dt.ID() {
-	case arrow.BOOL:
-		return &types.BooleanType{Nullability: nullability}, nil
-	case arrow.INT8:
-		return &types.Int8Type{Nullability: nullability}, nil
-	case arrow.INT16:
-		return &types.Int16Type{Nullability: nullability}, nil
-	case arrow.INT32:
-		return &types.Int32Type{Nullability: nullability}, nil
-	case arrow.INT64:
-		return &types.Int64Type{Nullability: nullability}, nil
-	case arrow.UINT8:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int8Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT16:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int16Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT32:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int32Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.UINT64:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int64Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.FLOAT16:
-		_, anchor, ok := ext.EncodeTypeVariation(dt)
-		if !ok {
-			return nil, arrow.ErrNotFound
-		}
-		return &types.Int16Type{
-			Nullability:      nullability,
-			TypeVariationRef: anchor,
-		}, nil
-	case arrow.FLOAT32:
-		return &types.Float32Type{Nullability: nullability}, nil
-	case arrow.FLOAT64:
-		return &types.Float64Type{Nullability: nullability}, nil
-	case arrow.STRING, arrow.LARGE_STRING:
-		return &types.StringType{Nullability: nullability}, nil
-	case arrow.BINARY, arrow.LARGE_BINARY:
-		return &types.BinaryType{Nullability: nullability}, nil
-	case arrow.DATE32:
-		return &types.DateType{Nullability: nullability}, nil
-	case arrow.EXTENSION:
-		dt := dt.(arrow.ExtensionType)
-		switch dt.ExtensionName() {
-		case "uuid":
-			return &types.UUIDType{Nullability: nullability}, nil
-		case "fixed_char":
-			return &types.FixedCharType{
-				Nullability: nullability,
-				Length:      int32(dt.StorageType().(*arrow.FixedSizeBinaryType).ByteWidth),
-			}, nil
-		case "varchar":
-			return &types.VarCharType{Nullability: nullability, Length: -1}, nil
-		case "interval_year":
-			return &types.IntervalYearType{Nullability: nullability}, nil
-		case "interval_day":
-			return &types.IntervalDayType{Nullability: nullability}, nil
-		default:
-			_, anchor, ok := ext.EncodeType(dt)
-			if !ok {
-				return nil, arrow.ErrNotFound
-			}
-			return &types.UserDefinedType{
-				Nullability:   nullability,
-				TypeReference: anchor,
-			}, nil
-		}
-	case arrow.FIXED_SIZE_BINARY:
-		return &types.FixedBinaryType{Nullability: nullability,
-			Length: int32(dt.(*arrow.FixedSizeBinaryType).ByteWidth)}, nil
-	case arrow.DECIMAL128, arrow.DECIMAL256:
-		dt := dt.(arrow.DecimalType)
-		return &types.DecimalType{Nullability: nullability,
-			Precision: dt.GetPrecision(), Scale: dt.GetScale()}, nil
-	case arrow.STRUCT:
-		dt := dt.(*arrow.StructType)
-		fields := make([]types.Type, dt.NumFields())
-		var err error
-		for i, f := range dt.Fields() {
-			fields[i], err = ToSubstraitType(f.Type, f.Nullable, ext)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return &types.StructType{
-			Nullability: nullability,
-			Types:       fields,
-		}, nil
-	case arrow.LIST, arrow.FIXED_SIZE_LIST, arrow.LARGE_LIST:
-		dt := dt.(arrow.NestedType)
-		elemType, err := ToSubstraitType(dt.Fields()[0].Type, dt.Fields()[0].Nullable, ext)
-		if err != nil {
-			return nil, err
-		}
-		return &types.ListType{
-			Nullability: nullability,
-			Type:        elemType,
-		}, nil
-	case arrow.MAP:
-		dt := dt.(*arrow.MapType)
-		keyType, err := ToSubstraitType(dt.KeyType(), false, ext)
-		if err != nil {
-			return nil, err
-		}
-		valueType, err := ToSubstraitType(dt.ItemType(), dt.ItemField().Nullable, ext)
-		if err != nil {
-			return nil, err
-		}
-
-		return &types.MapType{
-			Nullability: nullability,
-			Key:         keyType,
-			Value:       valueType,
-		}, nil
-	case arrow.TIME32:
-		unit := dt.(*arrow.Time32Type).Unit
-		return &types.PrecisionTimeType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(unit * 3),
-		}, nil
-	case arrow.TIME64:
-		unit := dt.(*arrow.Time64Type).Unit
-		return &types.PrecisionTimeType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(unit * 3),
-		}, nil
-	case arrow.TIMESTAMP:
-		dt := dt.(*arrow.TimestampType)
-		if dt.TimeZone != "" {
-			return &types.PrecisionTimestampTzType{
-				PrecisionTimestampType: types.PrecisionTimestampType{
-					Nullability: nullability,
-					Precision:   types.TimePrecision(dt.Unit * 3),
-				},
-			}, nil
-		}
-		return &types.PrecisionTimestampType{
-			Nullability: nullability,
-			Precision:   types.TimePrecision(dt.Unit * 3),
-		}, nil
-	}
-
-	return nil, arrow.ErrNotImplemented
+	return fromV9Type(converted)
 }
 
 // FromSubstraitType returns the appropriate Arrow data type for the given
@@ -807,140 +313,9 @@ func ToSubstraitType(dt arrow.DataType, nullable bool, ext ExtensionIDSet) (type
 // Since Substrait types contain their nullability also, the nullability
 // returned along with the data type.
 func FromSubstraitType(t types.Type, ext ExtensionIDSet) (arrow.DataType, bool, error) {
-	nullable := IsNullable(t)
-
-	if t.GetTypeVariationReference() > 0 {
-		_, dt, ok := ext.DecodeTypeArrow(t.GetTypeVariationReference())
-		if ok {
-			return dt, nullable, nil
-		}
+	converted, err := toV9Type(t)
+	if err != nil {
+		return nil, false, err
 	}
-
-	switch t := t.(type) {
-	case *types.BooleanType:
-		return arrow.FixedWidthTypes.Boolean, nullable, nil
-	case *types.Int8Type:
-		return arrow.PrimitiveTypes.Int8, nullable, nil
-	case *types.Int16Type:
-		return arrow.PrimitiveTypes.Int16, nullable, nil
-	case *types.Int32Type:
-		return arrow.PrimitiveTypes.Int32, nullable, nil
-	case *types.Int64Type:
-		return arrow.PrimitiveTypes.Int64, nullable, nil
-	case *types.Float32Type:
-		return arrow.PrimitiveTypes.Float32, nullable, nil
-	case *types.Float64Type:
-		return arrow.PrimitiveTypes.Float64, nullable, nil
-	case *types.StringType:
-		return arrow.BinaryTypes.String, nullable, nil
-	case *types.BinaryType:
-		return arrow.BinaryTypes.Binary, nullable, nil
-	case *types.PrecisionTimeType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.Time32Type{Unit: arrow.Second}, nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.Time32Type{Unit: arrow.Millisecond}, nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.Time64Type{Unit: arrow.Nanosecond}, nullable, nil
-		}
-	case *types.PrecisionTimestampType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.TimestampType{Unit: arrow.Second}, nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.TimestampType{Unit: arrow.Millisecond}, nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.TimestampType{Unit: arrow.Microsecond}, nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.TimestampType{Unit: arrow.Nanosecond}, nullable, nil
-		}
-	case *types.PrecisionTimestampTzType:
-		switch t.Precision {
-		case types.PrecisionSeconds:
-			return &arrow.TimestampType{Unit: arrow.Second, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionMilliSeconds:
-			return &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionMicroSeconds:
-			return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		case types.PrecisionNanoSeconds:
-			return &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: TimestampTzTimezone},
-				nullable, nil
-		}
-	case *types.TimestampType:
-		return &arrow.TimestampType{Unit: arrow.Microsecond}, nullable, nil
-	case *types.TimestampTzType:
-		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: TimestampTzTimezone},
-			nullable, nil
-	case *types.DateType:
-		return arrow.FixedWidthTypes.Date32, nullable, nil
-	case *types.TimeType:
-		return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil
-	case *types.IntervalYearType:
-		return intervalYear(), nullable, nil
-	case *types.IntervalDayType:
-		return intervalDay(), nullable, nil
-	case *types.UUIDType:
-		return uuid(), nullable, nil
-	case *types.FixedCharType:
-		return fixedChar(t.Length), nullable, nil
-	case *types.VarCharType:
-		return varChar(t.Length), nullable, nil
-	case *types.FixedBinaryType:
-		return &arrow.FixedSizeBinaryType{ByteWidth: int(t.Length)}, nullable, nil
-	case *types.DecimalType:
-		return &arrow.Decimal128Type{
-			Precision: t.Precision,
-			Scale:     t.Scale,
-		}, nullable, nil
-	case *types.StructType:
-		i := 0
-		fields, err := FieldsFromSubstrait(t.Types, func() string {
-			i++
-			return strconv.Itoa(i)
-		}, ext)
-		if err != nil {
-			return nil, false, err
-		}
-
-		return arrow.StructOf(fields...), nullable, nil
-	case *types.ListType:
-		elem, elemNullable, err := FromSubstraitType(t.Type, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		return arrow.ListOfField(arrow.Field{Name: "item", Type: elem, Nullable: elemNullable}),
-			nullable, nil
-	case *types.MapType:
-		key, keyNullable, err := FromSubstraitType(t.Key, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		if keyNullable {
-			return nil, false, fmt.Errorf("%w: encountered nullable key field when converting to arrow.Map",
-				arrow.ErrInvalid)
-		}
-
-		value, valueNullable, err := FromSubstraitType(t.Value, ext)
-		if err != nil {
-			return nil, false, err
-		}
-		ret := arrow.MapOf(key, value)
-		ret.SetItemNullable(valueNullable)
-		return ret, nullable, nil
-	case *types.UserDefinedType:
-		anchor := t.TypeReference
-		_, dt, ok := ext.DecodeTypeArrow(anchor)
-		if !ok {
-			return nil, false, arrow.ErrNotImplemented
-		}
-		return dt, nullable, nil
-	}
-
-	return nil, false, arrow.ErrNotImplemented
+	return core.FromSubstraitType(converted, coreExtensionSet(ext))
 }
