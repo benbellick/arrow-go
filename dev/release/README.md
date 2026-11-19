@@ -117,24 +117,18 @@ If the verification is successful, the message `RC looks good!` is shown.
 
 ## Releasing `substrait`
 
-`substrait` is a separate Go module,
-`github.com/apache/arrow-go/substrait`. It is versioned and
-released separately from the rest of Arrow Go, so that it can follow
-`substrait-go` major versions without requiring an Arrow Go major release.
-
-Its release uses the same scripts and steps as above, with `substrait` as
-an extra argument:
+`substrait/` is a separate Go module, `github.com/apache/arrow-go/substrait`,
+with its own version, tags, source archive and vote. Its release follows the
+same steps as above, using the scripts in `dev/release/substrait/`:
 
   1. Increment the version number in `substrait/doc.go`
-  2. Prepare RC and vote: `dev/release/release_rc.sh ${RC} substrait`
-  3. Publish: `dev/release/release.sh ${VERSION} ${RC} substrait`
-  4. Verify: `dev/release/verify_rc.sh ${VERSION} ${RC} substrait`
+  2. Prepare RC and vote: `dev/release/substrait/release_rc.sh ${RC}`
+  3. Publish: `dev/release/substrait/release.sh ${VERSION} ${RC}`
+  4. Verify: `dev/release/substrait/verify_rc.sh ${VERSION} ${RC}`
 
-The source archive is `apache-arrow-go-substrait-${VERSION}.tar.gz` and
-contains only the module. Tags are prefixed with the module's directory,
-for example `substrait/v1.0.0-rc1` and `substrait/v1.0.0`,
-which is how Go finds versions of a module in a subdirectory.
+Tags are prefixed with the module's directory, for example
+`substrait/v1.0.0-rc1` and `substrait/v1.0.0`, which is how Go finds versions
+of a module in a subdirectory.
 
-The module depends on a released version of Arrow Go. To use unreleased
-Arrow Go changes in `substrait`, release Arrow Go first and
-then update the requirement in `substrait/go.mod`.
+The module requires a released Arrow Go. To use unreleased Arrow Go changes,
+release Arrow Go first and then update the requirement in `substrait/go.mod`.

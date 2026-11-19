@@ -22,17 +22,13 @@ set -eu
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_TOP_DIR="$(cd "${SOURCE_DIR}/../../" && pwd)"
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "Usage: $0 <rc> [arrow-go|substrait]"
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 <rc>"
   echo " e.g.: $0 1"
-  echo " e.g.: $0 1 substrait"
   exit 1
 fi
 
 rc=$1
-
-# shellcheck source=dev/release/module.sh
-. "${SOURCE_DIR}/module.sh" "${2:-arrow-go}"
 
 : "${RELEASE_DEFAULT:=1}"
 : "${RELEASE_PULL:=${RELEASE_DEFAULT}}"
@@ -57,9 +53,12 @@ if [ "${RELEASE_PULL}" -gt 0 ]; then
   git pull --rebase --prune
 fi
 
-version=$(release_version .)
+version=$(grep -o '^const PkgVersion = ".*"' "arrow/doc.go" |
+  sed \
+    -e 's/^const PkgVersion = "//' \
+    -e 's/"$//')
 
-rc_tag="${RELEASE_TAG_PREFIX}${version}-rc${rc}"
+rc_tag="v${version}-rc${rc}"
 if [ "${RELEASE_PUSH_TAG}" -gt 0 ]; then
   echo "Tagging for RC: ${rc_tag}"
   git tag -a -m "${version} RC${rc}" "${rc_tag}"
@@ -68,7 +67,7 @@ fi
 
 rc_hash="$(git rev-list --max-count=1 "${rc_tag}")"
 
-id="${RELEASE_ARCHIVE_PREFIX}${version}"
+id="apache-arrow-go-${version}"
 tar_gz="${id}.tar.gz"
 
 git_origin_url="$(git remote get-url origin)"
@@ -124,12 +123,12 @@ echo ""
 echo "---------------------------------------------------------"
 cat <<MAIL
 To: dev@arrow.apache.org
-Subject: [VOTE][Go] Release ${RELEASE_NAME} ${version} RC${rc}
+Subject: [VOTE][Go] Release Apache Arrow Go ${version} RC${rc}
 
 Hi,
 
 I would like to propose the following release candidate (RC${rc}) of
-${RELEASE_NAME} version ${version}.
+Apache Arrow Go version ${version}.
 
 This release candidate is based on commit:
 ${rc_hash} [1]
@@ -145,9 +144,9 @@ and vote on the release. See [3] for how to validate a release candidate.
 
 The vote will be open for at least 72 hours.
 
-[ ] +1 Release this as ${RELEASE_NAME} ${version}
+[ ] +1 Release this as Apache Arrow Go ${version}
 [ ] +0
-[ ] -1 Do not release this as ${RELEASE_NAME} ${version} because...
+[ ] -1 Do not release this as Apache Arrow Go ${version} because...
 
 [1]: https://github.com/apache/arrow-go/tree/${rc_hash}
 [2]: https://github.com/apache/arrow-go/releases/${rc_tag}

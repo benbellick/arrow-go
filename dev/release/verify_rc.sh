@@ -22,16 +22,11 @@ set -eu
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOP_SOURCE_DIR="$(dirname "$(dirname "${SOURCE_DIR}")")"
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-  echo "Usage: $0 <version> <rc> [arrow-go|substrait]"
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 <version> <rc>"
   echo " e.g.: $0 18.0.0 1"
-  echo " e.g.: $0 1.0.0 1 substrait"
   exit 1
 fi
-
-MODULE="${3:-arrow-go}"
-# shellcheck source=dev/release/module.sh
-. "${SOURCE_DIR}/module.sh" "${MODULE}"
 
 set -o pipefail
 set -x
@@ -40,8 +35,8 @@ VERSION="$1"
 RC="$2"
 
 ARROW_KEYS_URL="https://www.apache.org/dyn/closer.lua?action=download&filename=arrow/KEYS"
-DOWNLOAD_RC_BASE_URL="https://github.com/apache/arrow-go/releases/download/${RELEASE_TAG_PREFIX}${VERSION}-rc${RC}"
-ARCHIVE_BASE_NAME="${RELEASE_ARCHIVE_PREFIX}${VERSION}"
+DOWNLOAD_RC_BASE_URL="https://github.com/apache/arrow-go/releases/download/v${VERSION}-rc${RC}"
+ARCHIVE_BASE_NAME="apache-arrow-go-${VERSION}"
 
 : "${VERIFY_DEFAULT:=1}"
 : "${VERIFY_DOWNLOAD:=${VERIFY_DEFAULT}}"
@@ -115,10 +110,6 @@ fetch_archive() {
 
 ensure_source_directory() {
   tar xf "${ARCHIVE_BASE_NAME}".tar.gz
-
-  if [ "${MODULE}" = "substrait" ]; then
-    return
-  fi
 
   if [ -d "${TOP_SOURCE_DIR}/arrow-testing/data" ]; then
     cp -a "${TOP_SOURCE_DIR}/arrow-testing" "${ARCHIVE_BASE_NAME}/"
@@ -216,19 +207,12 @@ ensure_go() {
 }
 
 test_source_distribution() {
-  if [ "${MODULE}" = "substrait" ]; then
-    go vet ./...
-    go test ./...
-    go test -tags assert,test ./...
-    return
-  fi
-
   "${TOP_SOURCE_DIR}/ci/scripts/build.sh" "$(pwd)"
   "${TOP_SOURCE_DIR}/ci/scripts/test.sh" "$(pwd)"
   # TODO: Integration test
 }
 
-setup_tmpdir "${MODULE}-${VERSION}-${RC}"
+setup_tmpdir "arrow-go-${VERSION}-${RC}"
 echo "Working in sandbox ${VERIFY_TMPDIR}"
 cd "${VERIFY_TMPDIR}"
 
