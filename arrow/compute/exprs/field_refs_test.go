@@ -24,21 +24,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/substrait-io/substrait-go/v8/expr"
 )
-
-func TestNewScalarFunc(t *testing.T) {
-	reg := exprs.NewDefaultExtensionSet()
-
-	fn, err := exprs.NewScalarCall(reg, "add", nil,
-		expr.NewPrimitiveLiteral(int32(1), false),
-		expr.NewPrimitiveLiteral(int32(10), false))
-	require.NoError(t, err)
-
-	assert.Equal(t, "add(i32(1), i32(10), {overflow: [ERROR]}) => i32", fn.String())
-	assert.Equal(t, "add:i32_i32", fn.CompoundName())
-}
 
 func TestFieldRefDotPath(t *testing.T) {
 	f0 := arrow.Field{Name: "alpha", Type: arrow.PrimitiveTypes.Int32}

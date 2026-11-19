@@ -369,6 +369,14 @@ func NewExtensionSetDefault(set expr.ExtensionRegistry) ExtensionIDSet {
 	return &extensionSet{ExtensionRegistry: set, reg: DefaultExtensionIDRegistry}
 }
 
+// NewDefaultExtensionSet constructs an empty extension set using the default
+// Arrow Extension registry and the default collection of substrait extensions
+// from the Substrait-go repo.
+func NewDefaultExtensionSet() ExtensionIDSet {
+	return NewExtensionSetDefault(
+		expr.NewEmptyExtensionRegistry(extensions.GetDefaultCollectionWithNoError()))
+}
+
 // NewExtensionSet creates a new extension set given a substrait extension registry,
 // and an Arrow <--> Substrait registry for mapping substrait extensions to
 // their Arrow equivalents. This extension set can then be used to manage a
