@@ -27,6 +27,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs/internal/shared"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
@@ -155,95 +156,12 @@ func init() {
 	}
 }
 
-type overflowBehavior string
-
-const (
-	overflowSILENT   = "SILENT"
-	overflowSATURATE = "SATURATE"
-	overflowERROR    = "ERROR"
-)
-
-type enumParser[typ ~string] struct {
-	values map[typ]struct{}
-}
-
-func (e *enumParser[typ]) parse(v string) (typ, error) {
-	out := typ(v)
-	if _, ok := e.values[out]; ok {
-		return out, nil
-	}
-	return "", arrow.ErrNotFound
-}
-
-var overflowParser = enumParser[overflowBehavior]{
-	values: map[overflowBehavior]struct{}{
-		overflowSILENT:   {},
-		overflowSATURATE: {},
-		overflowERROR:    {},
-	},
-}
-
-type caseSensitivity string
-
-const (
-	caseSensitive        caseSensitivity = "CASE_SENSITIVE"
-	caseInsensitive      caseSensitivity = "CASE_INSENSITIVE"
-	caseInsensitiveASCII caseSensitivity = "CASE_INSENSITIVE_ASCII"
-)
-
-var caseSensitivityParser = enumParser[caseSensitivity]{
-	values: map[caseSensitivity]struct{}{
-		caseSensitive:        {},
-		caseInsensitive:      {},
-		caseInsensitiveASCII: {},
-	},
-}
-
-func parseOption[typ ~string](sf *expr.ScalarFunction, optionName string, parser *enumParser[typ], implemented []typ, def typ) (typ, error) {
-	opts := sf.GetOption(optionName)
-	if len(opts) == 0 {
-		return def, nil
-	}
-
-	for _, o := range opts {
-		p, err := parser.parse(o)
-		if err != nil {
-			return def, arrow.ErrInvalid
-		}
-		for _, i := range implemented {
-			if i == p {
-				return p, nil
-			}
-		}
-	}
-
-	return def, arrow.ErrNotImplemented
-}
-
 type substraitToArrow = func(*expr.ScalarFunction, []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error)
 type arrowToSubstrait = func(fname string) (extensions.ID, []*types.FunctionOption, error)
 
-var substraitToArrowFuncMap = map[string]string{
-	"lt":  "less",
-	"gt":  "greater",
-	"lte": "less_equal",
-	"gte": "greater_equal",
-	"or":  "or_kleene",
-	"and": "and_kleene",
-}
-
-var arrowToSubstraitFuncMap = map[string]string{
-	"less":          "lt",
-	"greater":       "gt",
-	"less_equal":    "lte",
-	"greater_equal": "gte",
-	"and_kleene":    "and",
-	"or_kleene":     "or",
-}
-
 func setLookupFuncSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
 	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
+	f, ok := shared.SubstraitToArrowFuncMap[fname]
 	if ok {
 		fname = f
 	}
@@ -273,8 +191,8 @@ func startsWithSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Dat
 			arrow.ErrNotImplemented, len(input))
 	}
 
-	sensitivity, err := parseOption(sf, "case_sensitivity", &caseSensitivityParser,
-		[]caseSensitivity{caseSensitive, caseInsensitive}, caseSensitive)
+	sensitivity, err := shared.ParseOption(sf.GetOption("case_sensitivity"), &shared.CaseSensitivityParser,
+		[]shared.CaseSensitivity{shared.CaseSensitive, shared.CaseInsensitive}, shared.CaseSensitive)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("%w: starts_with case_sensitivity %v", err, sf.GetOption("case_sensitivity"))
 	}
@@ -297,7 +215,7 @@ func startsWithSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Dat
 
 	return "starts_with", input[:1], &compute.MatchSubstringOptions{
 		Pattern:    string(pattern.Data()),
-		IgnoreCase: sensitivity == caseInsensitive,
+		IgnoreCase: sensitivity == shared.CaseInsensitive,
 	}, nil
 }
 
@@ -305,7 +223,7 @@ func simpleMapSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datu
 	args = input
 
 	fname, _, _ = strings.Cut(sf.Name(), ":")
-	f, ok := substraitToArrowFuncMap[fname]
+	f, ok := shared.SubstraitToArrowFuncMap[fname]
 	if ok {
 		fname = f
 	}
@@ -314,7 +232,7 @@ func simpleMapSubstraitToArrowFunc(sf *expr.ScalarFunction, input []compute.Datu
 
 func simpleMapArrowToSubstraitFunc(urn string) arrowToSubstrait {
 	return func(fname string) (extensions.ID, []*types.FunctionOption, error) {
-		f, ok := arrowToSubstraitFuncMap[fname]
+		f, ok := shared.ArrowToSubstraitFuncMap[fname]
 		if ok {
 			fname = f
 		}
@@ -324,15 +242,15 @@ func simpleMapArrowToSubstraitFunc(urn string) arrowToSubstrait {
 
 func decodeOptionlessOverflowableArithmetic(n string) substraitToArrow {
 	return func(sf *expr.ScalarFunction, input []compute.Datum) (fname string, args []compute.Datum, opts compute.FunctionOptions, err error) {
-		overflow, err := parseOption(sf, "overflow", &overflowParser, []overflowBehavior{overflowSILENT, overflowERROR}, overflowSILENT)
+		overflow, err := shared.ParseOption(sf.GetOption("overflow"), &shared.OverflowParser, []shared.OverflowBehavior{shared.OverflowSilent, shared.OverflowError}, shared.OverflowSilent)
 		if err != nil {
 			return n, input, nil, err
 		}
 
 		switch overflow {
-		case overflowSILENT:
+		case shared.OverflowSilent:
 			return n + "_unchecked", input, nil, nil
-		case overflowERROR:
+		case shared.OverflowError:
 			return n, input, nil, nil
 		default:
 			return n, input, nil, arrow.ErrNotImplemented
@@ -874,15 +792,15 @@ func FromSubstraitType(t types.Type, ext ExtensionIDSet) (arrow.DataType, bool, 
 	case *types.TimeType:
 		return &arrow.Time64Type{Unit: arrow.Microsecond}, nullable, nil
 	case *types.IntervalYearType:
-		return intervalYear(), nullable, nil
+		return shared.IntervalYear(), nullable, nil
 	case *types.IntervalDayType:
-		return intervalDay(), nullable, nil
+		return shared.IntervalDay(), nullable, nil
 	case *types.UUIDType:
-		return uuid(), nullable, nil
+		return shared.UUID(), nullable, nil
 	case *types.FixedCharType:
-		return fixedChar(t.Length), nullable, nil
+		return shared.FixedChar(t.Length), nullable, nil
 	case *types.VarCharType:
-		return varChar(t.Length), nullable, nil
+		return shared.VarChar(t.Length), nullable, nil
 	case *types.FixedBinaryType:
 		return &arrow.FixedSizeBinaryType{ByteWidth: int(t.Length)}, nullable, nil
 	case *types.DecimalType:
