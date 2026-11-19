@@ -23,6 +23,7 @@ on:
       - '!dependabot/**'
     tags:
       - 'v*-rc*'
+      - 'arrow/compute/exprs/v*-rc*'
   pull_request:
 concurrency:
   group: ${{ github.repository }}-${{ github.event.pull_request.number || github.sha }}-${{ github.workflow }}
@@ -30,39 +31,56 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  archive:
-    name: Archive
+  modules:
+    name: Modules
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      modules: ${{ steps.modules.outputs.modules }}
+    steps:
+      - name: Select modules
+        id: modules
+        run: |
+          # An RC tag releases one module. Branches check that every module
+          # can still be released.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            modules='["arrow-go", "exprs"]'
+          elif [[ "${GITHUB_REF_NAME}" == arrow/compute/exprs/* ]]; then
+            modules='["exprs"]'
+          else
+            modules='["arrow-go"]'
+          fi
+          echo "modules=${modules}" >> "${GITHUB_OUTPUT}"
+  archive:
+    name: Archive ${{ matrix.module }}
+    needs:
+      - modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.modules.outputs.modules) }}
+    env:
+      MODULE: ${{ matrix.module }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
         with:
           submodules: recursive
-      - name: Prepare for tag
-        if: github.ref_type == 'tag'
-        run: |
-          version=${GITHUB_REF_NAME%-rc*}
-          version=${version#v}
-          rc=${GITHUB_REF_NAME#*-rc}
-          echo "VERSION=${version}" >> ${GITHUB_ENV}
-          echo "RC=${rc}" >> ${GITHUB_ENV}
-      - name: Prepare for branch
-        if: github.ref_type == 'branch'
-        run: |
-          version=$(grep -o '^const PkgVersion = ".*"' "arrow/doc.go" |
-            sed \
-              -e 's/^const PkgVersion = "//' \
-              -e 's/"$//')
-          rc=$(date +%Y%m%d)
-          echo "VERSION=${version}" >> ${GITHUB_ENV}
-          echo "RC=${rc}" >> ${GITHUB_ENV}
       - name: Archive
         run: |
-          id="apache-arrow-go-${VERSION}"
+          . dev/release/module.sh "${MODULE}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version=${GITHUB_REF_NAME#"${RELEASE_TAG_PREFIX}"}
+            version=${version%-rc*}
+          else
+            version=$(release_version .)
+          fi
+          id="${RELEASE_ARCHIVE_PREFIX}${version}"
           tar_gz="${id}.tar.gz"
           echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
-          git archive HEAD --prefix "${id}/" --output "${tar_gz}"
+          git archive "${RELEASE_ARCHIVE_TREE}" --prefix "${id}/" --output "${tar_gz}"
           sha256sum "${tar_gz}" > "${tar_gz}.sha256"
           sha512sum "${tar_gz}" > "${tar_gz}.sha512"
       - name: Audit
@@ -70,17 +88,19 @@ jobs:
           dev/release/run_rat.sh "${TAR_GZ}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: archive
+          name: archive-${{ matrix.module }}
           path: |
             apache-arrow-go-*
   verify:
-    name: Verify
+    name: Verify ${{ matrix.module }} on ${{ matrix.os }}
     needs:
+      - modules
       - archive
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        module: ${{ fromJSON(needs.modules.outputs.modules) }}
         os:
           - macos-latest
           # ubuntu-latest moved to 26.04, where LeakSanitizer in the clang 21
@@ -88,6 +108,8 @@ jobs:
           # such as arrow/memory/mallocator and arrow/cdata. Stay on 24.04
           # until that is fixed.
           - ubuntu-24.04
+    env:
+      MODULE: ${{ matrix.module }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
@@ -95,7 +117,7 @@ jobs:
           submodules: recursive
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: archive
+          name: archive-${{ matrix.module }}
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6.2.0
         with:
@@ -103,7 +125,7 @@ jobs:
       - name: Install ASan runtime
         # ci/scripts/test.sh only runs -asan against an LLVM >= 19 runtime;
         # ubuntu-24.04 defaults to clang 18.
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.module == 'arrow-go'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -111,8 +133,9 @@ jobs:
             libclang-rt-19-dev
       - name: Verify
         run: |
-          tar_gz=$(echo apache-arrow-go-*.tar.gz)
-          version=${tar_gz#apache-arrow-go-}
+          . dev/release/module.sh "${MODULE}"
+          tar_gz=$(echo "${RELEASE_ARCHIVE_PREFIX}"[0-9]*.tar.gz)
+          version=${tar_gz#"${RELEASE_ARCHIVE_PREFIX}"}
           version=${version%.tar.gz}
           # rc isn't used with VERIFY_DOWNLOAD=0
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
@@ -120,17 +143,21 @@ jobs:
           else
             rc=$(date +%Y%m%d)
           fi
-          VERIFY_DEFAULT=0 dev/release/verify_rc.sh "${version}" "${rc}"
+          VERIFY_DEFAULT=0 dev/release/verify_rc.sh "${version}" "${rc}" "${MODULE}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   upload:
-    name: Upload
+    name: Upload ${{ matrix.module }}
     if: github.ref_type == 'tag'
     needs:
+      - modules
       - verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        module: ${{ fromJSON(needs.modules.outputs.modules) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
@@ -138,13 +165,14 @@ jobs:
           submodules: recursive
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: archive
+          name: archive-${{ matrix.module }}
       - name: Upload
         run: |
+          . dev/release/module.sh "${{ matrix.module }}"
           # TODO: Add support for release note
           gh release create ${GITHUB_REF_NAME} \
             --prerelease \
-            --title "Apache Arrow Go ${GITHUB_REF_NAME}" \
+            --title "${RELEASE_NAME} ${GITHUB_REF_NAME}" \
             --verify-tag \
             apache-arrow-go-*.tar.gz \
             apache-arrow-go-*.tar.gz.sha*

@@ -21,6 +21,8 @@ on:
     tags:
       - "v*"
       - "!v*-rc*"
+      - "arrow/compute/exprs/v*"
+      - "!arrow/compute/exprs/v*-rc*"
 permissions:
   contents: write
   discussions: write
@@ -45,20 +47,29 @@ jobs:
             --dir dists
       - name: Create GitHub Release
         run: |
-          version=${GITHUB_REF_NAME#v}
+          case "${GITHUB_REF_NAME}" in
+          arrow/compute/exprs/v*)
+            title="Apache Arrow Go exprs ${GITHUB_REF_NAME#arrow/compute/exprs/v}"
+            ;;
+          *)
+            title="Apache Arrow Go ${GITHUB_REF_NAME#v}"
+            ;;
+          esac
           gh release create ${GITHUB_REF_NAME} \
             --discussion-category "General" \
             --generate-notes \
             --repo ${GITHUB_REPOSITORY} \
-            --title "Apache Arrow Go ${version}" \
+            --title "${title}" \
             --verify-tag \
             dists/*
       - name: Checkout asf-site
+        if: startsWith(github.ref_name, 'v')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
         with:
           ref: asf-site
           path: site
       - name: Update documentation
+        if: startsWith(github.ref_name, 'v')
         run: |
           # v18.4.1 -> 18.4.1
           version=${GITHUB_REF_NAME#v}
