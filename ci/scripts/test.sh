@@ -121,7 +121,14 @@ popd
 
 pushd "${source_dir}/arrow/compute/exprs"
 
+# exprs is released separately and requires a released Arrow Go. Test it
+# against that release, and against this checkout to catch breaking changes
+# before they are released.
 go test "${test_args[@]}" -short -tags ${tags} ./...
+
+exprs_workspace="$(mktemp -d)/go.work"
+GOWORK="${exprs_workspace}" go work init "${source_dir}" "${source_dir}/arrow/compute/exprs"
+GOWORK="${exprs_workspace}" go test "${test_args[@]}" -short -tags ${tags} ./...
 
 popd
 
