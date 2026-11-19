@@ -162,12 +162,7 @@ func (b *testBuilder) FieldRef(path ...any) argBuilder {
 	if err != nil {
 		return b.Wrap(nil, err)
 	}
-
-	segments := make([]expr.ReferenceSegment, len(fieldPath))
-	for i, p := range fieldPath {
-		segments[i] = expr.NewStructFieldRef(int32(p))
-	}
-	return b.RootRef(expr.FlattenRefSegments(segments...))
+	return b.RootRef(exprs.RefFromFieldPath(fieldPath))
 }
 
 func arithmeticFunc(name string) substraitext.ID {
@@ -287,11 +282,11 @@ func TestExecuteFieldRef(t *testing.T) {
 
 	tests := []struct {
 		testName string
-		path     []any
+		ref      compute.FieldRef
 		input    compute.Datum
 		expected compute.Datum
 	}{
-		{"basic ref", []any{"a"}, compute.NewDatumWithoutOwning(fromJSON(
+		{"basic ref", compute.FieldRefName("a"), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
 			`[
 			 	{"a": 6.125},
@@ -299,7 +294,7 @@ func TestExecuteFieldRef(t *testing.T) {
 				{"a": -1}
 			 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[6.125, 0.0, -1]`))},
-		{"ref one field", []any{"a"}, compute.NewDatumWithoutOwning(fromJSON(
+		{"ref one field", compute.FieldRefName("a"), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
 				arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -309,7 +304,7 @@ func TestExecuteFieldRef(t *testing.T) {
 				{"a": -1, "b": 4.0}
 			 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[6.125, 0.0, -1]`))},
-		{"second field", []any{"b"}, compute.NewDatumWithoutOwning(fromJSON(
+		{"second field", compute.FieldRefName("b"), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
 				arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -319,7 +314,7 @@ func TestExecuteFieldRef(t *testing.T) {
 					{"a": -1, "b": 4.0}
 				 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[7.5, 2.125, 4.0]`))},
-		{"nested field by path", []any{0, 0}, compute.NewDatumWithoutOwning(fromJSON(
+		{"nested field by path", compute.FieldRefPath(compute.FieldPath{0, 0}), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -330,7 +325,7 @@ func TestExecuteFieldRef(t *testing.T) {
 				{"a": {"b": -1}}
 			 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[6.125, 0.0, -1]`))},
-		{"nested field by name", []any{"a", "b"}, compute.NewDatumWithoutOwning(fromJSON(
+		{"nested field by name", compute.FieldRefList("a", "b"), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -341,7 +336,7 @@ func TestExecuteFieldRef(t *testing.T) {
 					{"a": {"b": -1}}
 				 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[6.125, 0.0, -1]`))},
-		{"nested field with nulls", []any{"a", "b"}, compute.NewDatumWithoutOwning(fromJSON(
+		{"nested field with nulls", compute.FieldRefList("a", "b"), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -352,19 +347,19 @@ func TestExecuteFieldRef(t *testing.T) {
 						{"a": {"b": null}}
 					 ]`)), compute.NewDatumWithoutOwning(fromJSON(
 			arrow.PrimitiveTypes.Float64, `[6.125, null, null]`))},
-		{"nested scalar", []any{"a", "b"}, compute.NewDatumWithoutOwning(
+		{"nested scalar", compute.FieldRefList("a", "b"), compute.NewDatumWithoutOwning(
 			scalarFromJSON(arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
 					Nullable: true}), `[{"a": {"b": 64.0}}]`)),
 			compute.NewDatum(scalar.NewFloat64Scalar(64.0))},
-		{"nested scalar with null", []any{"a", "b"}, compute.NewDatumWithoutOwning(
+		{"nested scalar with null", compute.FieldRefList("a", "b"), compute.NewDatumWithoutOwning(
 			scalarFromJSON(arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
 					Nullable: true}), `[{"a": {"b": null}}]`)),
 			compute.NewDatum(scalar.MakeNullScalar(arrow.PrimitiveTypes.Float64))},
-		{"nested scalar null", []any{"a", "b"}, compute.NewDatumWithoutOwning(
+		{"nested scalar null", compute.FieldRefList("a", "b"), compute.NewDatumWithoutOwning(
 			scalarFromJSON(arrow.StructOf(
 				arrow.Field{Name: "a", Type: arrow.StructOf(
 					arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Float64, Nullable: true}),
@@ -380,8 +375,9 @@ func TestExecuteFieldRef(t *testing.T) {
 			ctx := exprs.WithExtensionIDSet(compute.WithAllocator(context.Background(), mem), extSet)
 			dt := tt.input.(compute.ArrayLikeDatum).Type().(arrow.NestedType)
 			schema := arrow.NewSchema(dt.Fields(), nil)
-			ref, err := newTestBuilder(t, extSet, schema).FieldRef(tt.path...).BuildExpr()
+			ref, err := exprs.NewFieldRef(tt.ref, schema, extSet)
 			require.NoError(t, err)
+			assert.NotNil(t, ref)
 
 			actual, err := exprs.ExecuteScalarExpression(ctx, schema, ref, tt.input)
 			require.NoError(t, err)
@@ -1216,10 +1212,11 @@ func TestListElementRefPerRow(t *testing.T) {
 		require.NoError(t, err)
 		defer rec.Release()
 
+		ref, err := exprs.NewFieldRefFromDotPath(".l[1]", schema)
+		require.NoError(t, err)
 		st, err := exprs.ToSubstraitType(arrow.StructOf(schema.Fields()...), false, extSet)
 		require.NoError(t, err)
-		e, err := expr.NewRootFieldRef(&expr.StructFieldRef{Field: 0, Child: &expr.ListElementRef{Offset: 1}},
-			types.NewRecordTypeFromStruct(*st.(*types.StructType)))
+		e, err := expr.NewRootFieldRef(ref, types.NewRecordTypeFromStruct(*st.(*types.StructType)))
 		require.NoError(t, err)
 
 		ctx := exprs.WithExtensionIDSet(compute.WithAllocator(context.Background(), mem), extSet)
